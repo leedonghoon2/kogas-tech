@@ -122,13 +122,15 @@ export default function Import() {
     const seenCodes = new Set<string>();
 
     const parsed: Row[] = table.slice(1).map((cells, idx) => {
-      const get = (k: FieldKey) => (colIndex[k] >= 0 ? (cells[colIndex[k]] ?? '').trim() : '');
+      // 셀 안 줄바꿈은 공백으로 바꾼다 (예: '메탄올⏎(시약급)' → '메탄올 (시약급)')
+      const get = (k: FieldKey) =>
+        colIndex[k] >= 0 ? (cells[colIndex[k]] ?? '').replace(/\s*[\r\n]+\s*/g, ' ').trim() : '';
       const errors: string[] = [];
       const num = (k: FieldKey, label: string, allowNull: boolean): number | null => {
         const raw = get(k);
         if (raw === '') return allowNull ? null : 0;
         const n = parseQty(raw);
-        if (!Number.isFinite(n) || n < 0) {
+        if (!Number.isFinite(n) || n < 0 || n >= 1e10) {
           errors.push(`${label} 값 오류(${raw})`);
           return 0;
         }
@@ -191,28 +193,19 @@ export default function Import() {
     if (!targets.length) return;
     if (!confirm(`${targets.length}개 품목을 등록할까요?\n현재재고는 기초재고로 기록됩니다.`)) return;
     setBusy(true);
-    let done = 0;
-    try {
-      for (let i = 0; i < targets.length; i += 200) {
-        const batch = targets.slice(i, i + 200);
-        const { error } = await supabase.from('items').insert(batch);
-        if (error) throw error;
-        done += batch.length;
-      }
-      toast(`${done}개 품목이 등록되었습니다.`);
-      setResult(`✅ ${done}개 품목 등록 완료${counts.skip ? `, ${counts.skip}개 건너뜀` : ''}${counts.error ? `, ${counts.error}개 오류 제외` : ''}`);
-      setRows(null);
-      setText('');
-    } catch (e) {
-      // 이미 등록된 행은 '등록 완료'로 바꿔서, 다시 눌러도 중복 등록되지 않게 한다
-      const registered = new Set(targets.slice(0, done));
-      setRows((cur) =>
-        cur?.map((r) => (registered.has(r.data) ? { ...r, status: 'skip', message: '등록 완료' } : r)) ?? null,
-      );
-      setResult(`⚠️ ${done}개 등록 후 오류가 발생했습니다: ${errMsg(e)} — 문제를 고친 뒤 남은 품목만 다시 등록할 수 있습니다.`);
-    } finally {
-      setBusy(false);
+    // 한 번의 요청 = 한 트랜잭션: 전부 등록되거나 하나도 등록되지 않으므로 다시 시도해도 중복되지 않는다
+    const { error } = await supabase.from('items').insert(targets);
+    setBusy(false);
+    if (error) {
+      setResult(`⚠️ 등록하지 못했습니다 (아무 품목도 등록되지 않음): ${errMsg(error)}`);
+      return;
     }
+    toast(`${targets.length}개 품목이 등록되었습니다.`);
+    setResult(
+      `✅ ${targets.length}개 품목 등록 완료${counts.skip ? `, ${counts.skip}개 건너뜀` : ''}${counts.error ? `, ${counts.error}개 오류 제외` : ''}`,
+    );
+    setRows(null);
+    setText('');
   };
 
   return (

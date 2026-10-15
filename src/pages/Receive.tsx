@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import ItemPicker from '../components/ItemPicker';
 import ItemFormModal from '../components/ItemFormModal';
@@ -13,10 +13,11 @@ export default function Receive() {
   const { isAdmin } = useAuth();
   const toast = useToast();
   const [params] = useSearchParams();
+  const preselected = useRef(false);
   const { items, loading, reload } = useItems();
 
   const [item, setItem] = useState<Item | null>(null);
-  // null 이면 '오늘' — 페이지를 오래 열어 두어도 등록 시점의 날짜를 쓴다
+  // null 이면 '오늘' — 서버가 등록 시점의 한국 날짜를 쓴다 (PC 시계가 틀려도 안전)
   const [txDate, setTxDate] = useState<string | null>(null);
   const [qty, setQty] = useState('');
   const [supplier, setSupplier] = useState('');
@@ -29,7 +30,9 @@ export default function Receive() {
 
   useEffect(() => {
     const id = Number(params.get('item'));
-    if (id && items.length) setItem((cur) => cur ?? items.find((i) => i.id === id) ?? null);
+    if (preselected.current || !id || !items.length) return;
+    preselected.current = true; // 처음 한 번만 (사용자가 '변경'으로 지운 뒤 다시 채우지 않도록)
+    setItem((cur) => cur ?? items.find((i) => i.id === id) ?? null);
   }, [params, items]);
 
   // 목록이 새로고침되면(다른 사람의 입출고 반영) 선택한 품목도 최신 재고로 바꾼다
@@ -64,7 +67,7 @@ export default function Receive() {
     const { data, error } = await supabase.rpc('receive_item', {
       p_item_id: item.id,
       p_quantity: n,
-      p_tx_date: txDate ?? todayKST(),
+      p_tx_date: txDate,
       p_supplier: supplier,
       p_lot_no: lotNo,
       p_note: note,
@@ -77,7 +80,6 @@ export default function Receive() {
     setQty('');
     setLotNo('');
     setNote('');
-    setTxDate(null);
     reload();
     loadRecent();
   };
@@ -140,6 +142,9 @@ export default function Receive() {
               <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="예: 구매요청번호, 유효기한" />
             </label>
             {error && <p className="span-2 alert alert-error">{error}</p>}
+            {txDate && txDate !== todayKST() && (
+              <p className="span-2 alert alert-warn">오늘이 아닌 날짜({txDate})로 등록됩니다.</p>
+            )}
             <div className="span-2">
               <button className="btn btn-success btn-lg btn-block" disabled={busy}>
                 {busy ? '처리 중…' : '입고 등록 (재고 증가)'}

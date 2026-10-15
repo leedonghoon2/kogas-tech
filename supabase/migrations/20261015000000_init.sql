@@ -109,7 +109,9 @@ create table public.items (
   note            text not null default '',
   is_active       boolean not null default true,
   created_at      timestamptz not null default now(),
-  updated_at      timestamptz not null default now()
+  updated_at      timestamptz not null default now(),
+  -- 사용중지 품목에는 재고가 남아 있을 수 없다 (취소·재고조정 등 모든 경로에 적용)
+  constraint items_inactive_no_stock check (is_active or current_stock = 0)
 );
 
 create index items_name_idx on public.items (name);
@@ -408,6 +410,10 @@ begin
       trim_scale(v_item.current_stock), v_item.unit;
   end if;
 
+  if not v_item.is_active and v_new > 0 then
+    raise exception '사용 중지된 품목입니다: % (다시 사용으로 바꾼 뒤 조정하세요)', v_item.name;
+  end if;
+
   v_delta := v_new - v_item.current_stock;
   if v_delta = 0 then
     raise exception '현재 재고와 동일합니다.';
@@ -471,6 +477,9 @@ begin
 
   select * into v_item from public.items where id = v_orig.item_id for update;
   v_new := v_item.current_stock - v_orig.delta;
+  if not v_item.is_active and v_new > 0 then
+    raise exception '사용 중지된 품목의 기록은 취소할 수 없습니다: % (관리자가 다시 사용으로 바꾼 뒤 취소하세요)', v_item.name;
+  end if;
   if v_new < 0 then
     raise exception '취소하면 재고가 음수가 됩니다. (현재 % %)',
       trim_scale(v_item.current_stock), v_item.unit;

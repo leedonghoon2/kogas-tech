@@ -27,30 +27,40 @@ export function downloadCSV(filename: string, rows: Cell[][]): void {
 
 /** 따옴표로 감싼 셀(셀 안의 쉼표·탭·줄바꿈 포함)을 지원하는 구분자 파서 */
 export function parseDelimited(text: string, delimiter: ',' | '\t'): string[][] {
+  const src = text.replace(/^\uFEFF/, '');
+  const isEnd = (ch: string | undefined) => ch === undefined || ch === delimiter || ch === '\n' || ch === '\r';
+
+  // 셀 맨 앞의 따옴표가 '감싸는 따옴표'인지 확인: 닫는 따옴표 바로 뒤가 구분자·줄바꿈·끝이어야 한다.
+  // 아니면(예: "A"급 같은 일반 글자) 따옴표를 글자 그대로 취급해 행이 합쳐지지 않게 한다.
+  const closingQuote = (start: number): number => {
+    for (let j = start + 1; j < src.length; j++) {
+      if (src[j] !== '"') continue;
+      if (src[j + 1] === '"') {
+        j++;
+        continue;
+      }
+      return isEnd(src[j + 1]) ? j : -1;
+    }
+    return -1;
+  };
+
   const rows: string[][] = [];
   let row: string[] = [];
   let cell = '';
-  let inQuotes = false;
   let cellStart = true;
-  const src = text.replace(/^\uFEFF/, '');
 
   for (let i = 0; i < src.length; i++) {
     const c = src[i];
-    if (inQuotes) {
-      if (c === '"') {
-        if (src[i + 1] === '"') {
-          cell += '"';
-          i++;
-        } else {
-          inQuotes = false;
-        }
-      } else {
-        cell += c;
+    if (c === '"' && cellStart) {
+      const end = closingQuote(i);
+      if (end >= 0) {
+        cell = src.slice(i + 1, end).replace(/""/g, '"');
+        i = end;
+        cellStart = false;
+        continue;
       }
-    } else if (c === '"' && cellStart) {
-      inQuotes = true;
-      cellStart = false;
-    } else if (c === delimiter) {
+    }
+    if (c === delimiter) {
       row.push(cell);
       cell = '';
       cellStart = true;

@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import Modal from './Modal';
 import { errMsg, supabase } from '../lib/supabase';
 import type { Item } from '../lib/types';
@@ -14,16 +14,33 @@ interface Props {
 /** 재고 실사 결과를 반영하는 재고조정 (관리자) */
 export default function AdjustStockModal({ item, onClose, onDone }: Props) {
   const toast = useToast();
-  const [value, setValue] = useState(String(item.current_stock));
+  // 화면의 품목 정보가 오래됐을 수 있으므로 조정 창을 열 때 최신 재고를 다시 읽는다
+  const [stock, setStock] = useState<number | null>(null);
+  const [value, setValue] = useState('');
   const [reason, setReason] = useState('재고 실사');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
+  useEffect(() => {
+    supabase
+      .from('items')
+      .select('current_stock')
+      .eq('id', item.id)
+      .single()
+      .then(({ data, error }) => {
+        if (error) return setError(errMsg(error));
+        const current = Number(data.current_stock);
+        setStock(current);
+        setValue((v) => (v === '' ? String(current) : v));
+      });
+  }, [item.id]);
+
   const n = parseQty(value);
-  const diff = Number.isFinite(n) ? round3(n - Number(item.current_stock)) : NaN;
+  const diff = stock !== null && Number.isFinite(n) ? round3(n - stock) : NaN;
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
+    if (stock === null) return;
     if (!Number.isFinite(n) || n < 0) return setError('0 이상의 숫자를 입력하세요.');
     if (!reason.trim()) return setError('조정 사유를 입력하세요.');
     setBusy(true);
@@ -31,7 +48,7 @@ export default function AdjustStockModal({ item, onClose, onDone }: Props) {
       p_item_id: item.id,
       p_new_stock: n,
       p_reason: reason.trim(),
-      p_expected_stock: item.current_stock,
+      p_expected_stock: stock,
     });
     setBusy(false);
     if (error) return setError(errMsg(error));
@@ -48,7 +65,7 @@ export default function AdjustStockModal({ item, onClose, onDone }: Props) {
           <button type="button" className="btn" onClick={onClose}>
             닫기
           </button>
-          <button type="submit" form="adjust-form" className="btn btn-primary" disabled={busy}>
+          <button type="submit" form="adjust-form" className="btn btn-primary" disabled={busy || stock === null}>
             {busy ? '처리 중…' : '조정'}
           </button>
         </>
@@ -58,7 +75,7 @@ export default function AdjustStockModal({ item, onClose, onDone }: Props) {
         <p>
           <strong>{item.name}</strong> · 현재 전산 재고{' '}
           <strong>
-            {fmtQty(item.current_stock)} {item.unit}
+            {stock === null ? '확인 중…' : `${fmtQty(stock)} ${item.unit}`}
           </strong>
         </p>
         <label>

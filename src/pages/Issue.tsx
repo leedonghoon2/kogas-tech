@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import ItemPicker from '../components/ItemPicker';
 import { useAuth } from '../lib/auth';
@@ -12,11 +12,12 @@ export default function Issue() {
   const { profile } = useAuth();
   const toast = useToast();
   const [params] = useSearchParams();
+  const preselected = useRef(false);
   const { items, loading, reload } = useItems();
   const suggestions = useIssueSuggestions();
 
   const [item, setItem] = useState<Item | null>(null);
-  // null 이면 '오늘' — 페이지를 오래 열어 두어도 등록 시점의 날짜를 쓴다
+  // null 이면 '오늘' — 서버가 등록 시점의 한국 날짜를 쓴다 (PC 시계가 틀려도 안전)
   const [txDate, setTxDate] = useState<string | null>(null);
   const [qty, setQty] = useState('');
   const [department, setDepartment] = useState(profile?.department ?? '');
@@ -31,7 +32,9 @@ export default function Issue() {
   // ?item=ID 로 들어오면 해당 품목 선택
   useEffect(() => {
     const id = Number(params.get('item'));
-    if (id && items.length) setItem((cur) => cur ?? items.find((i) => i.id === id) ?? null);
+    if (preselected.current || !id || !items.length) return;
+    preselected.current = true; // 처음 한 번만 (사용자가 '변경'으로 지운 뒤 다시 채우지 않도록)
+    setItem((cur) => cur ?? items.find((i) => i.id === id) ?? null);
   }, [params, items]);
 
   // 목록이 새로고침되면(다른 사람의 입출고 반영) 선택한 품목도 최신 재고로 바꾼다
@@ -70,7 +73,7 @@ export default function Issue() {
     const { data, error } = await supabase.rpc('issue_item', {
       p_item_id: item.id,
       p_quantity: n,
-      p_tx_date: txDate ?? todayKST(),
+      p_tx_date: txDate,
       p_department: department,
       p_receiver: receiver,
       p_purpose: purpose,
@@ -89,7 +92,6 @@ export default function Issue() {
     setQty('');
     setPurpose('');
     setNote('');
-    setTxDate(null);
     reload();
     loadToday();
   };
@@ -158,6 +160,9 @@ export default function Issue() {
               <input value={note} onChange={(e) => setNote(e.target.value)} />
             </label>
             {error && <p className="span-2 alert alert-error">{error}</p>}
+            {txDate && txDate !== todayKST() && (
+              <p className="span-2 alert alert-warn">오늘이 아닌 날짜({txDate})로 등록됩니다.</p>
+            )}
             <div className="span-2">
               <button className="btn btn-primary btn-lg btn-block" disabled={busy}>
                 {busy ? '처리 중…' : '불출 등록 (재고 차감)'}

@@ -25,7 +25,7 @@ function readAuthRedirectError(): string {
   if (!code) return '';
   window.history.replaceState(null, '', window.location.pathname);
   if (code === 'otp_expired') return '메일의 링크가 만료되었거나 이미 사용되었습니다. 다시 요청하세요.';
-  return `인증 링크 오류: ${params.get('error_description') ?? code}`;
+  return '메일 링크로 로그인하지 못했습니다. 다시 시도하세요.';
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -35,7 +35,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // 어떤 사용자의 프로필을 불러왔는지 기록 (로그인 직후 이전 상태가 잠깐 보이는 것을 방지)
   const [profileFor, setProfileFor] = useState<string | null>(null);
   const [recovery, setRecovery] = useState(false);
-  const [authError] = useState(readAuthRedirectError);
+  const [authError, setAuthError] = useState(readAuthRedirectError);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
@@ -45,6 +45,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const { data } = supabase.auth.onAuthStateChange((event, s) => {
       if (event === 'PASSWORD_RECOVERY') setRecovery(true);
       else if (event === 'USER_UPDATED' || event === 'SIGNED_OUT') setRecovery(false);
+      if (event === 'SIGNED_IN' || event === 'SIGNED_OUT') setAuthError('');
       setSession(s);
       setSessionReady(true);
     });

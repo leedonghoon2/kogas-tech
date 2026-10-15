@@ -1053,3 +1053,15 @@ tr.import-skip {
 .stack > ul {
   margin: 0;
 }
+@media print {
+  .print-warning {
+    margin: 0 0 6px;
+    font-size: 10pt;
+    font-weight: 700;
+    color: #b91c1c;
+  }
+}
+.alert-warn {
+  background: var(--warn-soft);
+  color: #92400e;
+}

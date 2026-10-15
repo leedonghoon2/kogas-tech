@@ -56,6 +56,12 @@ export default function ItemDetail() {
   const toggleActive = async () => {
     if (!item) return;
     const next = !item.is_active;
+    if (!next && Number(item.current_stock) > 0) {
+      return toast(
+        `재고가 남아 있는 품목은 사용중지할 수 없습니다. (현재 ${fmtQty(item.current_stock)} ${item.unit})`,
+        'error',
+      );
+    }
     if (!next && !confirm(`'${item.name}' 품목을 사용중지할까요?\n사용중지된 품목은 입고·불출할 수 없습니다.`)) return;
     const { error } = await supabase.from('items').update({ is_active: next }).eq('id', item.id);
     if (error) return toast(errMsg(error), 'error');

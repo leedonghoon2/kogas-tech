@@ -1,6 +1,6 @@
 import { useMemo, useState, type ChangeEvent } from 'react';
 import { Link } from 'react-router-dom';
-import { downloadCSV, parseCSV, readTextFile } from '../lib/csv';
+import { downloadCSV, parseDelimited, readTextFile } from '../lib/csv';
 import { errMsg, fetchAll, supabase } from '../lib/supabase';
 import { fmtQty, parseQty } from '../lib/format';
 import { useToast } from '../lib/toast';
@@ -19,7 +19,7 @@ const FIELDS = [
   { key: 'designated_qty', label: '지정수량', aliases: [] },
   { key: 'location', label: '보관위치', aliases: ['위치', '보관장소', '저장위치'] },
   { key: 'safety_stock', label: '안전재고', aliases: ['최소재고', '적정재고'] },
-  { key: 'current_stock', label: '현재재고', aliases: ['재고', '재고량', '수량', '현재고'] },
+  { key: 'current_stock', label: '현재재고', aliases: ['재고', '재고량', '재고수량', '수량', '현재고', '현재수량', '보유량', '보유수량'] },
   { key: 'note', label: '비고', aliases: ['메모'] },
 ] as const;
 
@@ -46,25 +46,25 @@ interface Row {
   message: string;
 }
 
-const norm = (s: string) => s.replace(/[\s_()*.\-/]/g, '').toLowerCase();
+// 열 이름 비교용: '현재재고(L)', '현재 재고 *' 처럼 단위·표시가 붙어도 같은 열로 인식
+const norm = (s: string) =>
+  s
+    .replace(/\([^)]*\)|\[[^\]]*\]/g, '')
+    .replace(/[\s_*.\-/]/g, '')
+    .toLowerCase();
 
 function normalizeHazard(v: string): HazardClass | null {
   const t = v.replace(/\s/g, '');
   if (!t || t === '-' || /기타|비위험|일반|해당없음/.test(t)) return '기타';
-  const m = t.match(/^제?([1-6])(류|유)?/);
+  // '제4류', '4류', '4' 만 인정. '제1석유류'(제4류의 세부 품명)나 '6.1'(UN 등급)은 오류로 표시
+  const m = t.match(/^제?([1-6])(?:류|유)/) ?? t.match(/^([1-6])$/);
   return m ? (`제${m[1]}류` as HazardClass) : null;
 }
 
 function parseTable(text: string): string[][] {
+  // 엑셀에서 복사/붙여넣기한 표는 탭 구분 (셀 안 줄바꿈은 따옴표로 감싸져 있음)
   const firstLine = text.split(/\r?\n/, 1)[0] ?? '';
-  if (firstLine.includes('\t')) {
-    // 엑셀에서 복사/붙여넣기 (탭 구분)
-    return text
-      .split(/\r?\n/)
-      .map((l) => l.split('\t'))
-      .filter((r) => r.some((c) => c.trim() !== ''));
-  }
-  return parseCSV(text);
+  return parseDelimited(text, firstLine.includes('\t') ? '\t' : ',');
 }
 
 export default function Import() {
@@ -74,6 +74,7 @@ export default function Import() {
   const [parseError, setParseError] = useState('');
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState('');
+  const [warning, setWarning] = useState('');
 
   const downloadTemplate = () =>
     downloadCSV('재고일괄등록_양식.csv', [
@@ -94,6 +95,7 @@ export default function Import() {
   const analyze = async () => {
     setParseError('');
     setResult('');
+    setWarning('');
     const table = parseTable(text);
     if (table.length < 2) return setParseError('머리글(열 이름) 행과 1개 이상의 데이터 행이 필요합니다.');
 
@@ -105,6 +107,9 @@ export default function Import() {
     }
     const missing = FIELDS.filter((f) => 'required' in f && f.required && colIndex[f.key] < 0).map((f) => f.label);
     if (missing.length) return setParseError(`필수 열이 없습니다: ${missing.join(', ')} (양식을 내려받아 확인하세요)`);
+    if (colIndex.current_stock < 0) {
+      setWarning('「현재재고」 열을 찾지 못해 모든 품목의 재고가 0으로 등록됩니다. 열 이름을 확인하세요.');
+    }
 
     let existing: { code: string | null; name: string }[] = [];
     try {
@@ -199,7 +204,12 @@ export default function Import() {
       setRows(null);
       setText('');
     } catch (e) {
-      setResult(`⚠️ ${done}개 등록 후 오류가 발생했습니다: ${errMsg(e)}`);
+      // 이미 등록된 행은 '등록 완료'로 바꿔서, 다시 눌러도 중복 등록되지 않게 한다
+      const registered = new Set(targets.slice(0, done));
+      setRows((cur) =>
+        cur?.map((r) => (registered.has(r.data) ? { ...r, status: 'skip', message: '등록 완료' } : r)) ?? null,
+      );
+      setResult(`⚠️ ${done}개 등록 후 오류가 발생했습니다: ${errMsg(e)} — 문제를 고친 뒤 남은 품목만 다시 등록할 수 있습니다.`);
     } finally {
       setBusy(false);
     }
@@ -246,6 +256,7 @@ export default function Import() {
           className="mono"
         />
         {parseError && <p className="alert alert-error">{parseError}</p>}
+        {warning && <p className="alert alert-warn">{warning}</p>}
         {result && <p className="alert alert-info">{result}</p>}
       </section>
 

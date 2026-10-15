@@ -39,7 +39,7 @@ export async function fetchAll<T>(
     const { data, error } = await build(from, from + pageSize - 1);
     if (error) throw error;
     rows.push(...(data ?? []));
-    if (!data || data.length < pageSize) break;
+    if (!data || data.length < pageSize) return rows;
   }
-  return rows;
+  throw new Error(`조회 결과가 ${limit.toLocaleString()}건을 넘습니다. 기간을 나눠서 조회하세요.`);
 }

@@ -29,6 +29,13 @@ export function useItems(includeInactive = false) {
     reload();
   }, [reload]);
 
+  // 다른 앱·탭에 갔다가 돌아오면 최신 재고로 새로고침
+  useEffect(() => {
+    const onVisible = () => document.visibilityState === 'visible' && reload();
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [reload]);
+
   return { items, loading, error, reload };
 }
 

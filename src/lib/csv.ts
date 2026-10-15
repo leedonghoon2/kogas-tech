@@ -25,12 +25,14 @@ export function downloadCSV(filename: string, rows: Cell[][]): void {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-export function parseCSV(text: string): string[][] {
+/** 따옴표로 감싼 셀(셀 안의 쉼표·탭·줄바꿈 포함)을 지원하는 구분자 파서 */
+export function parseDelimited(text: string, delimiter: ',' | '\t'): string[][] {
   const rows: string[][] = [];
   let row: string[] = [];
   let cell = '';
   let inQuotes = false;
-  const src = text.replace(/^﻿/, '');
+  let cellStart = true;
+  const src = text.replace(/^\uFEFF/, '');
 
   for (let i = 0; i < src.length; i++) {
     const c = src[i];
@@ -45,19 +47,23 @@ export function parseCSV(text: string): string[][] {
       } else {
         cell += c;
       }
-    } else if (c === '"') {
+    } else if (c === '"' && cellStart) {
       inQuotes = true;
-    } else if (c === ',') {
+      cellStart = false;
+    } else if (c === delimiter) {
       row.push(cell);
       cell = '';
+      cellStart = true;
     } else if (c === '\n' || c === '\r') {
       if (c === '\r' && src[i + 1] === '\n') i++;
       row.push(cell);
       rows.push(row);
       row = [];
       cell = '';
+      cellStart = true;
     } else {
       cell += c;
+      cellStart = false;
     }
   }
   if (cell !== '' || row.length > 0) {
@@ -65,6 +71,10 @@ export function parseCSV(text: string): string[][] {
     rows.push(row);
   }
   return rows.filter((r) => r.some((c) => c.trim() !== ''));
+}
+
+export function parseCSV(text: string): string[][] {
+  return parseDelimited(text, ',');
 }
 
 /** 엑셀에서 저장한 CSV는 CP949(EUC-KR)인 경우가 많아 UTF-8 실패 시 EUC-KR로 읽는다. */

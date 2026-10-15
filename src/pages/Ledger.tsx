@@ -55,14 +55,18 @@ export default function Ledger() {
       if (applied.from) q = q.gte('tx_date', applied.from);
       if (applied.to) q = q.lte('tx_date', applied.to);
       if (applied.item.trim()) q = q.ilike('item_name', `%${applied.item.trim()}%`);
-      const p = applied.person.trim().replace(/[,()]/g, ' ');
-      if (p) {
-        q =
-          tab === 'IN'
-            ? q.ilike('supplier', `%${p}%`)
-            : q.or(`department.ilike.%${p}%,receiver.ilike.%${p}%,supplier.ilike.%${p}%`);
+      const person = applied.person.trim();
+      if (person) {
+        if (tab === 'IN') {
+          q = q.ilike('supplier', `%${person}%`);
+        } else {
+          // or() 구문의 구분 문자( , ( ) " \ )는 한 글자 와일드카드(_)로 바꿔 '(주)OO' 같은 이름도 검색되게 한다
+          const p = person.replace(/[,()"\\]/g, '_');
+          q = q.or(`department.ilike.%${p}%,receiver.ilike.%${p}%,supplier.ilike.%${p}%`);
+        }
       }
-      if (applied.hideCanceled) q = q.eq('canceled', false);
+      // 취소된 원거래와 그것을 되돌린 취소 기록을 함께 숨긴다
+      if (applied.hideCanceled) q = q.eq('canceled', false).neq('tx_type', 'CANCEL');
       return q;
     },
     [tab, applied],
@@ -72,8 +76,8 @@ export default function Ledger() {
   const load = useCallback(async () => {
     const id = ++reqId.current;
     setLoading(true);
+    // 등록 순서(id)로 정렬해야 날짜를 거슬러 입력한 기록이 있어도 잔여재고 열이 일관된다
     const { data, count, error } = await buildQuery(true)
-      .order('tx_date', { ascending: false })
       .order('id', { ascending: false })
       .range(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE - 1);
     if (id !== reqId.current) return; // 더 최근 조회가 있으면 무시
@@ -101,10 +105,8 @@ export default function Ledger() {
     };
   }, [printRows]);
 
-  const loadAllChronological = async () =>
-    fetchAll<TxView>((from, to) =>
-      buildQuery(false).order('tx_date', { ascending: true }).order('id', { ascending: true }).range(from, to),
-    );
+  const loadAllInOrder = async () =>
+    fetchAll<TxView>((from, to) => buildQuery(false).order('id', { ascending: true }).range(from, to));
 
   const meta = TABS.find((t) => t.key === tab)!;
   const periodText = `${applied.from || '처음'} ~ ${applied.to || '현재'}`;
@@ -112,7 +114,7 @@ export default function Ledger() {
   const exportCSV = async () => {
     setBusy(true);
     try {
-      const all = await loadAllChronological();
+      const all = await loadAllInOrder();
       downloadCSV(`${meta.label}_${applied.from}_${applied.to}.csv`, [
         columns(tab).map((c) => c.label),
         ...all.map((r, idx) => columns(tab).map((c) => c.csv(r, idx))),
@@ -127,7 +129,7 @@ export default function Ledger() {
   const print = async () => {
     setBusy(true);
     try {
-      setPrintRows(await loadAllChronological());
+      setPrintRows(await loadAllInOrder());
     } catch (e) {
       toast(errMsg(e), 'error');
     } finally {
@@ -282,6 +284,12 @@ export default function Ledger() {
             </tbody>
           </table>
         </div>
+        {!printRows && total > rows.length && (
+          <p className="print-warning">
+            ※ 화면에 표시된 {rows.length}건만 출력되었습니다 (전체 {total}건). 전체를 출력하려면 화면의 「인쇄」 버튼을
+            사용하세요.
+          </p>
+        )}
         <table className="table print-table">
           <thead>
             <tr>

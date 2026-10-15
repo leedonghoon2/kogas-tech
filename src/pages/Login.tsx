@@ -1,9 +1,11 @@
 import { useState, type FormEvent } from 'react';
+import { useAuth } from '../lib/auth';
 import { errMsg, supabase } from '../lib/supabase';
 
 type Mode = 'login' | 'signup' | 'reset';
 
 export default function Login() {
+  const { authError } = useAuth();
   const [mode, setMode] = useState<Mode>('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -66,6 +68,8 @@ export default function Login() {
           <h1>위험물 창고 재고관리</h1>
           <p className="muted">입고 · 불출 · 불출대장 · 사용량 관리</p>
         </div>
+
+        {authError && <p className="alert alert-error">{authError}</p>}
 
         {mode !== 'reset' && (
           <div className="tabs">

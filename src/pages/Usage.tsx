@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import HazardBadge from '../components/HazardBadge';
 import { downloadCSV } from '../lib/csv';
-import { errMsg, supabase } from '../lib/supabase';
+import { errMsg, fetchAll, supabase } from '../lib/supabase';
 import { fmtQty, monthEndKST, monthStartKST, todayKST, yearStartKST } from '../lib/format';
 import { useToast } from '../lib/toast';
 import type { UsageByDepartment, UsageByItem } from '../lib/types';
@@ -26,14 +26,20 @@ export default function Usage() {
   const load = useCallback(
     async (f: string, t: string) => {
       setLoading(true);
-      const [a, b] = await Promise.all([
-        supabase.rpc('usage_by_item', { p_from: f, p_to: t }),
-        supabase.rpc('usage_by_department', { p_from: f, p_to: t }),
-      ]);
-      setLoading(false);
-      if (a.error || b.error) return toast(errMsg(a.error ?? b.error), 'error');
-      setByItem((a.data as UsageByItem[]) ?? []);
-      setByDept((b.data as UsageByDepartment[]) ?? []);
+      try {
+        const [a, b] = await Promise.all([
+          fetchAll<UsageByItem>((from, to) => supabase.rpc('usage_by_item', { p_from: f, p_to: t }).range(from, to)),
+          fetchAll<UsageByDepartment>((from, to) =>
+            supabase.rpc('usage_by_department', { p_from: f, p_to: t }).range(from, to),
+          ),
+        ]);
+        setByItem(a);
+        setByDept(b);
+      } catch (e) {
+        toast(errMsg(e), 'error');
+      } finally {
+        setLoading(false);
+      }
     },
     [toast],
   );

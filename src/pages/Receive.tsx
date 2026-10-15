@@ -16,7 +16,8 @@ export default function Receive() {
   const { items, loading, reload } = useItems();
 
   const [item, setItem] = useState<Item | null>(null);
-  const [txDate, setTxDate] = useState(todayKST());
+  // null 이면 '오늘' — 페이지를 오래 열어 두어도 등록 시점의 날짜를 쓴다
+  const [txDate, setTxDate] = useState<string | null>(null);
   const [qty, setQty] = useState('');
   const [supplier, setSupplier] = useState('');
   const [lotNo, setLotNo] = useState('');
@@ -30,6 +31,11 @@ export default function Receive() {
     const id = Number(params.get('item'));
     if (id && items.length) setItem((cur) => cur ?? items.find((i) => i.id === id) ?? null);
   }, [params, items]);
+
+  // 목록이 새로고침되면(다른 사람의 입출고 반영) 선택한 품목도 최신 재고로 바꾼다
+  useEffect(() => {
+    setItem((cur) => (cur ? (items.find((i) => i.id === cur.id) ?? cur) : cur));
+  }, [items]);
 
   const loadRecent = useCallback(async () => {
     const { data } = await supabase
@@ -58,7 +64,7 @@ export default function Receive() {
     const { data, error } = await supabase.rpc('receive_item', {
       p_item_id: item.id,
       p_quantity: n,
-      p_tx_date: txDate,
+      p_tx_date: txDate ?? todayKST(),
       p_supplier: supplier,
       p_lot_no: lotNo,
       p_note: note,
@@ -71,6 +77,7 @@ export default function Receive() {
     setQty('');
     setLotNo('');
     setNote('');
+    setTxDate(null);
     reload();
     loadRecent();
   };
@@ -91,12 +98,19 @@ export default function Receive() {
           <form onSubmit={submit} className="form-grid">
             <div className="span-2">
               <span className="label">입고 품목 *</span>
-              {loading ? <p className="muted">품목을 불러오는 중…</p> : <ItemPicker items={items} value={item} onChange={setItem} autoFocus />}
+              {loading && items.length === 0 ? <p className="muted">품목을 불러오는 중…</p> : <ItemPicker items={items} value={item} onChange={setItem} autoFocus />}
               {!isAdmin && <p className="muted small">목록에 없는 품목은 관리자에게 품목 등록을 요청하세요.</p>}
             </div>
             <label>
               입고일자 *
-              <input type="date" value={txDate} onChange={(e) => setTxDate(e.target.value)} max={todayKST()} required />
+              <input
+                type="date"
+                value={txDate ?? todayKST()}
+                onChange={(e) => setTxDate(e.target.value || null)}
+                min={todayKST(-30)}
+                max={todayKST()}
+                required
+              />
             </label>
             <label>
               입고 수량 {item ? `(${item.unit})` : ''} *

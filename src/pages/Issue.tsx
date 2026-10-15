@@ -16,7 +16,8 @@ export default function Issue() {
   const suggestions = useIssueSuggestions();
 
   const [item, setItem] = useState<Item | null>(null);
-  const [txDate, setTxDate] = useState(todayKST());
+  // null 이면 '오늘' — 페이지를 오래 열어 두어도 등록 시점의 날짜를 쓴다
+  const [txDate, setTxDate] = useState<string | null>(null);
   const [qty, setQty] = useState('');
   const [department, setDepartment] = useState(profile?.department ?? '');
   const [receiver, setReceiver] = useState(profile?.full_name ?? '');
@@ -32,6 +33,11 @@ export default function Issue() {
     const id = Number(params.get('item'));
     if (id && items.length) setItem((cur) => cur ?? items.find((i) => i.id === id) ?? null);
   }, [params, items]);
+
+  // 목록이 새로고침되면(다른 사람의 입출고 반영) 선택한 품목도 최신 재고로 바꾼다
+  useEffect(() => {
+    setItem((cur) => (cur ? (items.find((i) => i.id === cur.id) ?? cur) : cur));
+  }, [items]);
 
   const loadToday = useCallback(async () => {
     const { data } = await supabase
@@ -57,7 +63,6 @@ export default function Issue() {
     setError('');
     if (!item) return setError('불출할 품목을 선택하세요.');
     if (!Number.isFinite(n) || n <= 0) return setError('불출 수량을 올바르게 입력하세요.');
-    if (insufficient) return setError('재고가 부족합니다.');
     if (!department.trim()) return setError('사용부서를 입력하세요.');
     if (!receiver.trim()) return setError('사용자(수령자)를 입력하세요.');
 
@@ -65,7 +70,7 @@ export default function Issue() {
     const { data, error } = await supabase.rpc('issue_item', {
       p_item_id: item.id,
       p_quantity: n,
-      p_tx_date: txDate,
+      p_tx_date: txDate ?? todayKST(),
       p_department: department,
       p_receiver: receiver,
       p_purpose: purpose,
@@ -84,6 +89,7 @@ export default function Issue() {
     setQty('');
     setPurpose('');
     setNote('');
+    setTxDate(null);
     reload();
     loadToday();
   };
@@ -102,11 +108,18 @@ export default function Issue() {
           <form onSubmit={submit} className="form-grid">
             <div className="span-2">
               <span className="label">불출 품목 *</span>
-              {loading ? <p className="muted">품목을 불러오는 중…</p> : <ItemPicker items={items} value={item} onChange={setItem} autoFocus />}
+              {loading && items.length === 0 ? <p className="muted">품목을 불러오는 중…</p> : <ItemPicker items={items} value={item} onChange={setItem} autoFocus />}
             </div>
             <label>
               불출일자 *
-              <input type="date" value={txDate} onChange={(e) => setTxDate(e.target.value)} max={todayKST()} required />
+              <input
+                type="date"
+                value={txDate ?? todayKST()}
+                onChange={(e) => setTxDate(e.target.value || null)}
+                min={todayKST(-30)}
+                max={todayKST()}
+                required
+              />
             </label>
             <label>
               불출 수량 {item ? `(${item.unit})` : ''} *
@@ -118,7 +131,7 @@ export default function Issue() {
                 <strong>
                   {fmtQty(remaining)} {item.unit}
                 </strong>
-                {insufficient && ' (재고 부족)'}
+                {insufficient && ' — 재고가 부족합니다. 다른 사람이 입고했다면 등록 시 최신 재고로 다시 확인합니다.'}
                 {!insufficient && Number(item.safety_stock) > 0 && remaining <= Number(item.safety_stock) && (
                   <span> · 안전재고({fmtQty(item.safety_stock)}) 이하가 됩니다</span>
                 )}
@@ -146,7 +159,7 @@ export default function Issue() {
             </label>
             {error && <p className="span-2 alert alert-error">{error}</p>}
             <div className="span-2">
-              <button className="btn btn-primary btn-lg btn-block" disabled={busy || insufficient}>
+              <button className="btn btn-primary btn-lg btn-block" disabled={busy}>
                 {busy ? '처리 중…' : '불출 등록 (재고 차감)'}
               </button>
             </div>

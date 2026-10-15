@@ -31,6 +31,7 @@ export default function AdjustStockModal({ item, onClose, onDone }: Props) {
       p_item_id: item.id,
       p_new_stock: n,
       p_reason: reason.trim(),
+      p_expected_stock: item.current_stock,
     });
     setBusy(false);
     if (error) return setError(errMsg(error));

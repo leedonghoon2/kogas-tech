@@ -24,7 +24,8 @@ create table public.profiles (
   created_at  timestamptz not null default now()
 );
 
--- 가입 시 프로필 자동 생성. 최초 가입자는 관리자, 이후 가입자는 승인 대기.
+-- 가입 시 프로필 자동 생성. 시스템 최초 가입자만 관리자, 이후 가입자는 승인 대기.
+-- (관리자 계정이 모두 삭제돼도 다음 가입자가 자동으로 관리자가 되지 않습니다. 복구는 README 참고)
 create or replace function public.handle_new_user()
 returns trigger
 language plpgsql
@@ -34,7 +35,9 @@ as $$
 declare
   v_role text := 'pending';
 begin
-  if not exists (select 1 from public.profiles where role = 'admin') then
+  -- 동시에 여러 명이 가입해도 관리자는 한 명만 생기도록 직렬화
+  perform pg_advisory_xact_lock(hashtext('public.handle_new_user'));
+  if not exists (select 1 from public.profiles) then
     v_role := 'admin';
   end if;
 
@@ -99,10 +102,10 @@ create table public.items (
   un_no           text not null default '',
   spec            text not null default '',            -- 규격/용기 (예: 18L 캔)
   unit            text not null default 'L',
-  designated_qty  numeric(14, 3) check (designated_qty is null or designated_qty > 0), -- 지정수량
+  designated_qty  numeric(14, 3) check (designated_qty is null or (designated_qty > 0 and designated_qty <> 'NaN')), -- 지정수량
   location        text not null default '',            -- 보관위치
-  safety_stock    numeric(14, 3) not null default 0 check (safety_stock >= 0),
-  current_stock   numeric(14, 3) not null default 0 check (current_stock >= 0),
+  safety_stock    numeric(14, 3) not null default 0 check (safety_stock >= 0 and safety_stock <> 'NaN'),
+  current_stock   numeric(14, 3) not null default 0 check (current_stock >= 0 and current_stock <> 'NaN'),
   note            text not null default '',
   is_active       boolean not null default true,
   created_at      timestamptz not null default now(),
@@ -111,20 +114,25 @@ create table public.items (
 
 create index items_name_idx on public.items (name);
 
-create or replace function public.touch_updated_at()
+create or replace function public.items_before_update()
 returns trigger
 language plpgsql
 set search_path = ''
 as $$
 begin
+  -- 재고가 남아 있는 위험물이 현황·지정수량 배수에서 빠지지 않도록 사용중지를 막는다
+  if old.is_active and not new.is_active and new.current_stock > 0 then
+    raise exception '재고가 남아 있는 품목은 사용중지할 수 없습니다. (현재 % %) 재고를 모두 불출하거나 재고조정 후 사용중지하세요.',
+      trim_scale(new.current_stock), new.unit;
+  end if;
   new.updated_at := now();
   return new;
 end;
 $$;
 
-create trigger items_touch_updated_at
+create trigger items_before_update
   before update on public.items
-  for each row execute function public.touch_updated_at();
+  for each row execute function public.items_before_update();
 
 -- ---------------------------------------------------------------------
 -- 수불 기록 (입고/불출/조정/취소 원장)
@@ -134,9 +142,9 @@ create table public.transactions (
   item_id          bigint not null references public.items (id),
   -- INIT: 기초재고, IN: 입고, OUT: 불출, ADJUST: 재고조정, CANCEL: 취소
   tx_type          text not null check (tx_type in ('INIT', 'IN', 'OUT', 'ADJUST', 'CANCEL')),
-  quantity         numeric(14, 3) not null check (quantity > 0),  -- 입력 수량 (항상 양수)
-  delta            numeric(14, 3) not null,                       -- 재고 증감 (부호 포함)
-  balance_after    numeric(14, 3) not null check (balance_after >= 0),
+  quantity         numeric(14, 3) not null check (quantity > 0 and quantity <> 'NaN'),  -- 입력 수량 (항상 양수)
+  delta            numeric(14, 3) not null check (delta <> 'NaN'),  -- 재고 증감 (부호 포함)
+  balance_after    numeric(14, 3) not null check (balance_after >= 0 and balance_after <> 'NaN'),
   tx_date          date not null default ((now() at time zone 'Asia/Seoul')::date),
   department       text not null default '',  -- 사용부서 (불출)
   receiver         text not null default '',  -- 사용자/수령자 (불출)
@@ -163,7 +171,11 @@ stable
 security definer
 set search_path = ''
 as $$
-  select coalesce(nullif(full_name, ''), email, '')
+  -- 이름은 사용자가 바꿀 수 있으므로, 바꿀 수 없는 이메일 아이디를 함께 기록한다
+  select case
+           when full_name <> '' then full_name || ' (' || split_part(email, '@', 1) || ')'
+           else email
+         end
   from public.profiles where id = auth.uid()
 $$;
 
@@ -191,6 +203,57 @@ create trigger items_record_initial_stock
   for each row execute function public.record_initial_stock();
 
 -- ---------------------------------------------------------------------
+-- 입력값 검증
+-- ---------------------------------------------------------------------
+-- 수량: NULL·NaN·음수·0(허용 시 제외)·너무 큰 값 거부, 소수점 3자리로 반올림
+create or replace function public.valid_qty(p_value numeric, p_label text, p_allow_zero boolean default false)
+returns numeric
+language plpgsql
+immutable
+set search_path = ''
+as $$
+declare
+  v numeric;
+begin
+  -- numeric 의 NaN 은 모든 수보다 크게 취급되어 '<= 0' 검사를 통과하므로 따로 막는다
+  if p_value is null or p_value = 'NaN'::numeric then
+    raise exception '%: 올바른 숫자를 입력하세요.', p_label;
+  end if;
+  v := round(p_value, 3);
+  if v < 0 or (v = 0 and not p_allow_zero) then
+    raise exception '%: %', p_label, case when p_allow_zero then '0 이상이어야 합니다.' else '0보다 커야 합니다.' end;
+  end if;
+  if v >= 10000000000 then
+    raise exception '%: 값이 너무 큽니다.', p_label;
+  end if;
+  return v;
+end;
+$$;
+
+-- 거래일자: 비우면 오늘(한국시간). 미래 날짜와 30일보다 이전 날짜는 거부
+create or replace function public.valid_tx_date(p_date date)
+returns date
+language plpgsql
+stable
+set search_path = ''
+as $$
+declare
+  v_today date := (now() at time zone 'Asia/Seoul')::date;
+begin
+  if p_date is null then
+    return v_today;
+  end if;
+  if p_date > v_today then
+    raise exception '미래 날짜(%)는 입력할 수 없습니다.', p_date;
+  end if;
+  if p_date < v_today - 30 then
+    raise exception '30일보다 이전 날짜(%)는 입력할 수 없습니다. 필요하면 관리자에게 재고조정을 요청하세요.', p_date;
+  end if;
+  return p_date;
+end;
+$$;
+
+-- ---------------------------------------------------------------------
 -- 불출
 -- ---------------------------------------------------------------------
 create or replace function public.issue_item(
@@ -210,15 +273,15 @@ set search_path = ''
 as $$
 declare
   v_item public.items;
-  v_qty  numeric := round(p_quantity, 3);
+  v_qty  numeric;
+  v_date date;
   v_tx   public.transactions;
 begin
   if not public.is_staff() then
     raise exception '권한이 없습니다.' using errcode = '42501';
   end if;
-  if v_qty is null or v_qty <= 0 then
-    raise exception '불출 수량은 0보다 커야 합니다.';
-  end if;
+  v_qty := public.valid_qty(p_quantity, '불출 수량');
+  v_date := public.valid_tx_date(p_tx_date);
   if coalesce(trim(p_receiver), '') = '' then
     raise exception '사용자(수령자)를 입력하세요.';
   end if;
@@ -244,8 +307,7 @@ begin
     (item_id, tx_type, quantity, delta, balance_after, tx_date,
      department, receiver, purpose, use_place, note, created_by, created_by_name)
   values
-    (p_item_id, 'OUT', v_qty, -v_qty, v_item.current_stock,
-     coalesce(p_tx_date, (now() at time zone 'Asia/Seoul')::date),
+    (p_item_id, 'OUT', v_qty, -v_qty, v_item.current_stock, v_date,
      coalesce(trim(p_department), ''), trim(p_receiver), coalesce(trim(p_purpose), ''),
      coalesce(trim(p_use_place), ''), coalesce(trim(p_note), ''),
      auth.uid(), coalesce(public.current_user_name(), ''))
@@ -273,15 +335,15 @@ set search_path = ''
 as $$
 declare
   v_item public.items;
-  v_qty  numeric := round(p_quantity, 3);
+  v_qty  numeric;
+  v_date date;
   v_tx   public.transactions;
 begin
   if not public.is_staff() then
     raise exception '권한이 없습니다.' using errcode = '42501';
   end if;
-  if v_qty is null or v_qty <= 0 then
-    raise exception '입고 수량은 0보다 커야 합니다.';
-  end if;
+  v_qty := public.valid_qty(p_quantity, '입고 수량');
+  v_date := public.valid_tx_date(p_tx_date);
 
   select * into v_item from public.items where id = p_item_id for update;
   if not found then
@@ -300,8 +362,7 @@ begin
     (item_id, tx_type, quantity, delta, balance_after, tx_date,
      supplier, lot_no, note, created_by, created_by_name)
   values
-    (p_item_id, 'IN', v_qty, v_qty, v_item.current_stock,
-     coalesce(p_tx_date, (now() at time zone 'Asia/Seoul')::date),
+    (p_item_id, 'IN', v_qty, v_qty, v_item.current_stock, v_date,
      coalesce(trim(p_supplier), ''), coalesce(trim(p_lot_no), ''), coalesce(trim(p_note), ''),
      auth.uid(), coalesce(public.current_user_name(), ''))
   returning * into v_tx;
@@ -314,9 +375,10 @@ $$;
 -- 재고조정 (재고 실사 결과 반영) - 관리자
 -- ---------------------------------------------------------------------
 create or replace function public.adjust_stock(
-  p_item_id   bigint,
-  p_new_stock numeric,
-  p_reason    text
+  p_item_id        bigint,
+  p_new_stock      numeric,
+  p_reason         text,
+  p_expected_stock numeric default null  -- 조정 화면을 열 때의 재고 (그 사이 입출고가 있으면 거부)
 )
 returns public.transactions
 language plpgsql
@@ -325,16 +387,14 @@ set search_path = ''
 as $$
 declare
   v_item  public.items;
-  v_new   numeric := round(p_new_stock, 3);
+  v_new   numeric;
   v_delta numeric;
   v_tx    public.transactions;
 begin
   if not public.is_admin() then
     raise exception '관리자만 재고를 조정할 수 있습니다.' using errcode = '42501';
   end if;
-  if v_new is null or v_new < 0 then
-    raise exception '조정 재고는 0 이상이어야 합니다.';
-  end if;
+  v_new := public.valid_qty(p_new_stock, '실사 재고', true);
   if coalesce(trim(p_reason), '') = '' then
     raise exception '조정 사유를 입력하세요.';
   end if;
@@ -342,6 +402,10 @@ begin
   select * into v_item from public.items where id = p_item_id for update;
   if not found then
     raise exception '품목을 찾을 수 없습니다.';
+  end if;
+  if p_expected_stock is not null and v_item.current_stock is distinct from round(p_expected_stock, 3) then
+    raise exception '조정 화면을 연 뒤 재고가 바뀌었습니다. (현재 % %) 다시 열어 확인 후 조정하세요.',
+      trim_scale(v_item.current_stock), v_item.unit;
   end if;
 
   v_delta := v_new - v_item.current_stock;
@@ -587,10 +651,12 @@ create policy transactions_select on public.transactions
 revoke execute on function
   public.handle_new_user(),
   public.record_initial_stock(),
-  public.touch_updated_at(),
+  public.items_before_update(),
+  public.valid_qty(numeric, text, boolean),
+  public.valid_tx_date(date),
   public.issue_item(bigint, numeric, date, text, text, text, text, text),
   public.receive_item(bigint, numeric, date, text, text, text),
-  public.adjust_stock(bigint, numeric, text),
+  public.adjust_stock(bigint, numeric, text, numeric),
   public.cancel_transaction(bigint, text),
   public.set_user_role(uuid, text),
   public.usage_by_item(date, date),
@@ -604,7 +670,7 @@ revoke execute on function
 grant execute on function
   public.issue_item(bigint, numeric, date, text, text, text, text, text),
   public.receive_item(bigint, numeric, date, text, text, text),
-  public.adjust_stock(bigint, numeric, text),
+  public.adjust_stock(bigint, numeric, text, numeric),
   public.cancel_transaction(bigint, text),
   public.set_user_role(uuid, text),
   public.usage_by_item(date, date),
